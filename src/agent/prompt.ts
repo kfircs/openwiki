@@ -128,6 +128,7 @@ export function createModeInstructions(command: OpenWikiCommand): string {
 - Always use git-oriented repository evidence to understand recent changes. Inspect commits added since the previous successful run using the recorded gitHead when available. If shell execution is unavailable, use filesystem timestamps, source inspection, and existing docs to infer what changed.
 - Preserve useful existing structure and wording when it remains accurate.
 - Update stale pages, add missing pages, remove obsolete claims, and keep quickstart links accurate.
+- Updates may be a no-op. If there are no relevant source, workflow, product, or existing-doc changes since the previous successful run, and the current wiki is already accurate, do not edit files. Say that the wiki is already current.
 - The CLI will record successful run metadata in ${UPDATE_METADATA_PATH} after you finish.
 `.trim();
 }
@@ -161,7 +162,7 @@ ${context.gitSummary}
     `
 Update the existing OpenWiki documentation for this repository.
 
-Inspect ${OPEN_WIKI_DIR}/, identify recent source changes, and refresh the documentation so it remains accurate and complete. Use the git evidence below when available. The CLI will update ${UPDATE_METADATA_PATH} after you finish.
+Inspect ${OPEN_WIKI_DIR}/, identify recent source changes, and refresh the documentation only if changes are needed for accuracy or completeness. Use the git evidence below when available. If the wiki is already current, do not edit files. The CLI will update ${UPDATE_METADATA_PATH} only when OpenWiki content changes.
 
 Last update metadata:
 ${formatLastUpdate(context.lastUpdate)}

@@ -21,7 +21,11 @@ import {
   OPENROUTER_FALLBACK_MODEL_IDS,
   OPENWIKI_MODEL_ID_ENV_KEY,
 } from "../constants.js";
-import { createRunContext, writeLastUpdateMetadata } from "./utils.js";
+import {
+  createOpenWikiContentSnapshot,
+  createRunContext,
+  writeLastUpdateMetadata,
+} from "./utils.js";
 
 export async function runOpenWikiAgent(
   command: OpenWikiCommand,
@@ -134,6 +138,9 @@ async function runOpenWikiAgentCore(
 ): Promise<OpenWikiRunResult> {
   const context = await createRunContext(command, cwd);
   emitDebug(options, "context=created");
+  const openWikiSnapshotBefore =
+    command === "chat" ? null : await createOpenWikiContentSnapshot(cwd);
+  emitDebug(options, "openwiki.snapshot=created");
   const model = await createModel(modelId);
   emitDebug(
     options,
@@ -197,11 +204,19 @@ async function runOpenWikiAgentCore(
   emitDebug(options, "stream=completed");
   await chmodIfExists(checkpointPath, 0o600);
 
-  if (command !== "chat") {
+  if (
+    command !== "chat" &&
+    openWikiSnapshotBefore !== (await createOpenWikiContentSnapshot(cwd))
+  ) {
     await writeLastUpdateMetadata(command, cwd, modelId);
     emitDebug(options, "metadata=written");
   } else {
-    emitDebug(options, "metadata=skipped command=chat");
+    emitDebug(
+      options,
+      command === "chat"
+        ? "metadata=skipped command=chat"
+        : "metadata=skipped openwiki=unchanged",
+    );
   }
 
   return {

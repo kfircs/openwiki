@@ -1,12 +1,18 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
-import { UPDATE_METADATA_PATH } from "../constants.js";
+import { OPEN_WIKI_DIR, UPDATE_METADATA_PATH } from "../constants.js";
 import type { OpenWikiCommand, RunContext, UpdateMetadata } from "./types.js";
 
 const execFileAsync = promisify(execFile);
 
+export type OpenWikiContentSnapshot = string;
+
+/**
+ * Builds the per-run context the prompt uses to reason about prior docs and git changes.
+ */
 export async function createRunContext(
   command: OpenWikiCommand,
   cwd: string,
@@ -26,6 +32,9 @@ export async function createRunContext(
   };
 }
 
+/**
+ * Records a successful init/update run so future updates can diff from this git head.
+ */
 export async function writeLastUpdateMetadata(
   command: OpenWikiCommand,
   cwd: string,
@@ -47,6 +56,23 @@ export async function writeLastUpdateMetadata(
   );
 }
 
+/**
+ * Hashes OpenWiki content, excluding run metadata, to detect real documentation changes.
+ */
+export async function createOpenWikiContentSnapshot(
+  cwd: string,
+): Promise<OpenWikiContentSnapshot> {
+  const openWikiDir = path.join(cwd, OPEN_WIKI_DIR);
+  const hash = createHash("sha256");
+
+  await addDirectoryToSnapshot(hash, openWikiDir, "");
+
+  return hash.digest("hex");
+}
+
+/**
+ * Reads prior run metadata if it exists and is structurally valid.
+ */
 async function readLastUpdate(cwd: string): Promise<UpdateMetadata | null> {
   const metadataFile = path.join(cwd, UPDATE_METADATA_PATH);
 
@@ -80,6 +106,56 @@ async function readLastUpdate(cwd: string): Promise<UpdateMetadata | null> {
   }
 }
 
+/**
+ * Recursively adds stable file paths and bytes to the OpenWiki content snapshot.
+ */
+async function addDirectoryToSnapshot(
+  hash: ReturnType<typeof createHash>,
+  directory: string,
+  relativeDirectory: string,
+): Promise<void> {
+  let entries: string[];
+
+  try {
+    entries = await readdir(directory);
+  } catch (error) {
+    if (isFileNotFoundError(error)) {
+      hash.update("missing");
+      return;
+    }
+
+    throw error;
+  }
+
+  for (const entry of entries.sort()) {
+    const entryPath = path.join(directory, entry);
+    const relativePath = path.join(relativeDirectory, entry);
+
+    if (relativePath === path.basename(UPDATE_METADATA_PATH)) {
+      continue;
+    }
+
+    const entryStat = await stat(entryPath);
+
+    if (entryStat.isDirectory()) {
+      hash.update(`dir:${relativePath}\0`);
+      await addDirectoryToSnapshot(hash, entryPath, relativePath);
+      continue;
+    }
+
+    if (!entryStat.isFile()) {
+      continue;
+    }
+
+    hash.update(`file:${relativePath}\0`);
+    hash.update(await readFile(entryPath));
+    hash.update("\0");
+  }
+}
+
+/**
+ * Produces the git evidence block passed to init/update prompts.
+ */
 async function createGitSummary(
   command: OpenWikiCommand,
   cwd: string,
@@ -88,21 +164,9 @@ async function createGitSummary(
   const sections: string[] = [];
   const status = await runGit(cwd, ["status", "--short"]);
   const head = await getGitHead(cwd);
-  const recentLog = await runGit(cwd, [
-    "log",
-    "--max-count=20",
-    "--name-status",
-    "--oneline",
-  ]);
 
   sections.push(formatGitSection("git status --short", status));
   sections.push(formatGitSection("git rev-parse HEAD", head ?? "(unknown)"));
-  sections.push(
-    formatGitSection(
-      "git log --max-count=20 --name-status --oneline",
-      recentLog,
-    ),
-  );
 
   if (command === "update" && lastUpdate?.gitHead) {
     const logSinceLastHead = await runGit(cwd, [
@@ -133,8 +197,24 @@ async function createGitSummary(
         logSinceLastUpdate,
       ),
     );
-  } else if (command === "update") {
-    sections.push("No prior OpenWiki update timestamp was found.");
+  } else {
+    const recentLog = await runGit(cwd, [
+      "log",
+      "--max-count=20",
+      "--name-status",
+      "--oneline",
+    ]);
+
+    if (command === "update") {
+      sections.push("No prior OpenWiki update timestamp was found.");
+    }
+
+    sections.push(
+      formatGitSection(
+        "git log --max-count=20 --name-status --oneline",
+        recentLog,
+      ),
+    );
   }
 
   const diff = await runGit(cwd, ["diff", "--name-status", "HEAD"]);
@@ -149,12 +229,19 @@ async function getGitHead(cwd: string): Promise<string | undefined> {
   return head.length > 0 ? head : undefined;
 }
 
+/**
+ * Runs git commands without failing the whole run for normal git command errors.
+ */
 async function runGit(cwd: string, args: string[]): Promise<string> {
   try {
-    const { stdout, stderr } = await execFileAsync("git", args, {
-      cwd,
-      maxBuffer: 1024 * 1024,
-    });
+    const { stdout, stderr } = await execFileAsync(
+      "git",
+      ["--no-pager", ...args],
+      {
+        cwd,
+        maxBuffer: 1024 * 1024,
+      },
+    );
 
     return [stdout.trim(), stderr.trim()].filter(Boolean).join("\n").trim();
   } catch (error) {
