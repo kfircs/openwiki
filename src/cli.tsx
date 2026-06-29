@@ -89,10 +89,11 @@ type ErrorDiagnostic = {
 };
 
 type AppProps = {
+  autoExitOnSuccess?: boolean;
   command: CliCommand;
 };
 
-function App({ command }: AppProps) {
+function App({ autoExitOnSuccess = false, command }: AppProps) {
   const app = useApp();
   const startupModelId = command.kind === "run" ? command.modelId : null;
   const [sessionModelId, setSessionModelId] = useState<string | null>(
@@ -341,7 +342,12 @@ function App({ command }: AppProps) {
       app.exit();
       return;
     }
-  }, [app, runState.status]);
+
+    if (runState.status === "success" && autoExitOnSuccess) {
+      process.exitCode = 0;
+      app.exit();
+    }
+  }, [app, autoExitOnSuccess, runState.status]);
 
   if (command.kind === "help") {
     return <HelpView />;
@@ -426,6 +432,19 @@ function App({ command }: AppProps) {
   }
 
   if (runState.status === "success") {
+    if (autoExitOnSuccess) {
+      return (
+        <RunView
+          command={runState.result.command}
+          credentialDiagnostics={runState.credentialDiagnostics}
+          done
+          log={runState.log}
+          message={activeUserMessage}
+          modelId={runState.result.model}
+        />
+      );
+    }
+
     return (
       <Box flexDirection="column">
         <Header
@@ -2738,7 +2757,12 @@ if (argvRequestsOneShot(argv) && command.kind === "error") {
 } else if (shouldRunOnce(command)) {
   await runPrintCommand(command);
 } else {
-  render(<App command={command} />);
+  render(
+    <App
+      autoExitOnSuccess={shouldAutoExitStartupRun(command, argv)}
+      command={command}
+    />,
+  );
 }
 
 function argvRequestsPrint(argv: string[]): boolean {
@@ -2756,12 +2780,19 @@ function isOneShotArg(arg: string): boolean {
 function shouldRunOnce(
   command: CliCommand,
 ): command is Extract<CliCommand, { kind: "run" }> {
+  return command.kind === "run" && !command.dryRun && command.print;
+}
+
+function shouldAutoExitStartupRun(
+  command: CliCommand,
+  argv: string[],
+): boolean {
   return (
     command.kind === "run" &&
     !command.dryRun &&
-    (command.print ||
-      command.command === "init" ||
-      command.command === "update")
+    !command.print &&
+    command.shouldStart &&
+    argv.some(isOneShotArg)
   );
 }
 
