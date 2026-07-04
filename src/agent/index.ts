@@ -21,7 +21,6 @@ import {
   getDefaultModelId,
   getProviderApiKeyEnvKey,
   getProviderConfig,
-  getProviderLabel,
   isValidModelId,
   normalizeModelId,
   OPENAI_API_KEY_ENV_KEY,
@@ -162,7 +161,7 @@ async function runOpenWikiAgentCore(
   const openWikiSnapshotBefore =
     command === "chat" ? null : await createOpenWikiContentSnapshot(cwd);
   emitDebug(options, "openwiki.snapshot=created");
-  const model = await createModel(provider, modelId);
+  const model = await createModel(provider, modelId, options);
   emitDebug(options, `model.provider=${provider}`);
   if (provider === "openrouter") {
     emitDebug(
@@ -349,11 +348,16 @@ function isFileNotFoundError(error: unknown): boolean {
 }
 
 function ensureProviderKey(provider: OpenWikiProvider): void {
-  const apiKeyEnvKey = getProviderApiKeyEnvKey(provider);
+  const config = getProviderConfig(provider);
+  if (config.apiKeyRequired === false) {
+    return;
+  }
+
+  const apiKeyEnvKey = config.apiKeyEnvKey;
 
   if (!process.env[apiKeyEnvKey]) {
     throw new Error(
-      `${apiKeyEnvKey} is required to run OpenWiki with ${getProviderLabel(provider)}.`,
+      `${apiKeyEnvKey} is required to run OpenWiki with ${config.label}.`,
     );
   }
 }
@@ -377,7 +381,191 @@ function resolveModelId(
   return modelId;
 }
 
-async function createModel(provider: OpenWikiProvider, modelId: string) {
+type ChatMessagePayload = {
+  role: string;
+  content?: string | null | Array<{ type?: string; text?: string }>;
+  tool_calls?: Array<{ id?: string }> | null;
+  tool_call_id?: string | null;
+};
+
+function createOllamaFetch(options: OpenWikiRunOptions) {
+  return async (
+    url: string | URL | Request,
+    init?: RequestInit,
+  ): Promise<Response> => {
+    if (init?.body && typeof init.body === "string") {
+      try {
+        const body = JSON.parse(init.body) as {
+          messages?: ChatMessagePayload[];
+          stream?: boolean;
+        };
+        // Force non-streaming for Ollama compatibility and response intercepting
+        body.stream = false;
+
+        if (body.messages && Array.isArray(body.messages)) {
+          let lastToolCallId = "";
+          body.messages = body.messages.map((msg, idx) => {
+            // Normalize and flatten content to string
+            let contentStr = "";
+            if (Array.isArray(msg.content)) {
+              contentStr = msg.content
+                .map((item) => {
+                  if (typeof item === "string") return item;
+                  return item.text || "";
+                })
+                .join("\n");
+            } else if (typeof msg.content === "string") {
+              contentStr = msg.content;
+            }
+
+            const newMsg: {
+              role: string;
+              content: string;
+              tool_calls?: Array<{ id?: string }> | null;
+              tool_call_id?: string | null;
+            } = {
+              role: msg.role,
+              content: contentStr,
+            };
+
+            if (msg.tool_calls) {
+              newMsg.tool_calls = msg.tool_calls;
+            }
+            if (msg.tool_call_id) {
+              newMsg.tool_call_id = msg.tool_call_id;
+            }
+
+            // Convert mid-history system messages to user messages
+            if (newMsg.role === "system" && idx > 0) {
+              newMsg.role = "user";
+              newMsg.content = `[System Instruction]\n${newMsg.content}`;
+            }
+
+            // Ensure assistant messages are not completely empty
+            if (
+              newMsg.role === "assistant" &&
+              !newMsg.content &&
+              (!newMsg.tool_calls || newMsg.tool_calls.length === 0)
+            ) {
+              newMsg.content = " ";
+            }
+
+            // Sanitize tool calls and track their IDs
+            if (newMsg.tool_calls && Array.isArray(newMsg.tool_calls)) {
+              newMsg.tool_calls.forEach((tc) => {
+                if (!tc.id) {
+                  tc.id = `call_${Math.random().toString(36).slice(2, 11)}`;
+                }
+                lastToolCallId = tc.id;
+              });
+            }
+
+            // Ensure tool messages have a matching tool_call_id
+            if (newMsg.role === "tool" && !newMsg.tool_call_id) {
+              newMsg.tool_call_id =
+                lastToolCallId ||
+                `call_${Math.random().toString(36).slice(2, 11)}`;
+            }
+
+            return newMsg;
+          });
+
+          init.body = JSON.stringify(body);
+        }
+      } catch {
+        // Ignore JSON parse errors
+      }
+    }
+
+    emitDebug(options, `[ollamaFetch] Requesting: ${url}`);
+    try {
+      const response = await fetch(url, init);
+      if (!response.ok) {
+        const clone = response.clone();
+        const errText = await clone.text();
+        emitDebug(
+          options,
+          `[ollamaFetch] Error Status: ${response.status} - ${response.statusText}`,
+        );
+        emitDebug(options, `[ollamaFetch] Error Response Body: ${errText}`);
+        if (init?.body && typeof init.body === "string") {
+          emitDebug(options, `[ollamaFetch] Request Payload: ${init.body}`);
+        }
+      } else {
+        // Parse and sanitize response to fix Ollama over-serialization issues
+        const clone = response.clone();
+        const text = await clone.text();
+        try {
+          const json = JSON.parse(text);
+          let modified = false;
+          if (json.choices && Array.isArray(json.choices)) {
+            for (const choice of json.choices) {
+              if (
+                choice.message?.tool_calls &&
+                Array.isArray(choice.message.tool_calls)
+              ) {
+                for (const tc of choice.message.tool_calls) {
+                  if (tc.function?.arguments) {
+                    try {
+                      const args = JSON.parse(tc.function.arguments) as Record<
+                        string,
+                        unknown
+                      >;
+                      let argsModified = false;
+                      for (const key of Object.keys(args)) {
+                        const val = args[key];
+                        if (typeof val === "string") {
+                          const trimmed = val.trim();
+                          if (
+                            (trimmed.startsWith("[") &&
+                              trimmed.endsWith("]")) ||
+                            (trimmed.startsWith("{") && trimmed.endsWith("}"))
+                          ) {
+                            try {
+                              args[key] = JSON.parse(trimmed);
+                              argsModified = true;
+                            } catch {
+                              // not valid JSON
+                            }
+                          }
+                        }
+                      }
+                      if (argsModified) {
+                        tc.function.arguments = JSON.stringify(args);
+                        modified = true;
+                      }
+                    } catch {
+                      // ignore argument parse error
+                    }
+                  }
+                }
+              }
+            }
+          }
+          if (modified) {
+            return new Response(JSON.stringify(json), {
+              status: response.status,
+              statusText: response.statusText,
+              headers: response.headers,
+            });
+          }
+        } catch {
+          // ignore JSON parse error of body
+        }
+      }
+      return response;
+    } catch (error) {
+      emitDebug(options, `[ollamaFetch] Network Error: ${String(error)}`);
+      throw error;
+    }
+  };
+}
+
+async function createModel(
+  provider: OpenWikiProvider,
+  modelId: string,
+  options: OpenWikiRunOptions = {},
+) {
   if (provider === "anthropic") {
     return new ChatAnthropic(modelId, {
       apiKey: process.env[getProviderApiKeyEnvKey(provider)],
@@ -398,14 +586,18 @@ async function createModel(provider: OpenWikiProvider, modelId: string) {
   }
 
   const providerConfig = getProviderConfig(provider);
+  const configuration: { baseURL?: string; fetch?: typeof fetch } = {};
+  if (providerConfig.baseURL) {
+    configuration.baseURL = providerConfig.baseURL;
+  }
+  if (provider === "ollama") {
+    configuration.fetch = createOllamaFetch(options);
+  }
 
   return new ChatOpenAI({
-    apiKey: process.env[getProviderApiKeyEnvKey(provider)],
-    configuration: providerConfig.baseURL
-      ? {
-          baseURL: providerConfig.baseURL,
-        }
-      : undefined,
+    apiKey:
+      process.env[providerConfig.apiKeyEnvKey] || providerConfig.defaultApiKey,
+    configuration,
     model: modelId,
   });
 }

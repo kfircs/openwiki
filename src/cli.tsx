@@ -31,6 +31,7 @@ import {
   FIREWORKS_API_KEY_ENV_KEY,
   getDefaultModelId,
   getProviderApiKeyEnvKey,
+  getProviderConfig,
   getProviderLabel,
   getProviderModelOptions,
   isValidModelId,
@@ -1505,9 +1506,11 @@ function ChatInput({
     const provider = normalizeProvider(rawProvider);
 
     if (provider === null) {
-      setError(
-        "Enter a valid provider: openrouter, baseten, fireworks, openai, or anthropic.",
-      );
+      const providersList =
+        SELECTABLE_OPENWIKI_PROVIDERS.slice(0, -1).join(", ") +
+        ", or " +
+        SELECTABLE_OPENWIKI_PROVIDERS[SELECTABLE_OPENWIKI_PROVIDERS.length - 1];
+      setError(`Enter a valid provider: ${providersList}.`);
       return;
     }
 
@@ -1518,10 +1521,14 @@ function ChatInput({
     try {
       await onProviderSelect(provider);
       resetInput();
+      const config = getProviderConfig(provider);
+      const isApiKeyRequired = config.apiKeyRequired !== false;
       setNotice(
-        `Provider switched to ${getProviderLabel(provider)} with model ${getDefaultModelId(
-          provider,
-        )}. Ensure ${getProviderApiKeyEnvKey(provider)} is set.`,
+        isApiKeyRequired
+          ? `Provider switched to ${config.label} with model ${getDefaultModelId(
+              provider,
+            )}. Ensure ${config.apiKeyEnvKey} is set.`
+          : `Provider switched to ${config.label} with model ${getDefaultModelId(provider)}.`,
       );
     } catch (saveError) {
       setError(

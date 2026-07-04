@@ -5,6 +5,8 @@ export const FIREWORKS_API_KEY_ENV_KEY = "FIREWORKS_API_KEY";
 export const OPENAI_API_KEY_ENV_KEY = "OPENAI_API_KEY";
 export const ANTHROPIC_API_KEY_ENV_KEY = "ANTHROPIC_API_KEY";
 export const OPENROUTER_API_KEY_ENV_KEY = "OPENROUTER_API_KEY";
+export const OLLAMA_API_KEY_ENV_KEY = "OLLAMA_API_KEY";
+export const OLLAMA_BASE_URL_ENV_KEY = "OLLAMA_BASE_URL";
 export const OPENWIKI_PROVIDER_ENV_KEY = "OPENWIKI_PROVIDER";
 export const OPENWIKI_MODEL_ID_ENV_KEY = "OPENWIKI_MODEL_ID";
 export const DEFAULT_PROVIDER = "openrouter";
@@ -15,7 +17,8 @@ export type OpenWikiProvider =
   | "baseten"
   | "fireworks"
   | "openai"
-  | "openrouter";
+  | "openrouter"
+  | "ollama";
 
 export type SelectableOpenWikiProvider = OpenWikiProvider;
 
@@ -26,7 +29,10 @@ export type ProviderModelOption = {
 
 type ProviderConfig = {
   apiKeyEnvKey: string;
+  apiKeyRequired?: boolean;
+  defaultApiKey?: string;
   baseURL?: string;
+  resolveBaseURL?: (env: NodeJS.ProcessEnv) => string | undefined;
   label: string;
   modelOptions: ProviderModelOption[];
 };
@@ -37,6 +43,7 @@ export const SELECTABLE_OPENWIKI_PROVIDERS = [
   "fireworks",
   "openai",
   "anthropic",
+  "ollama",
 ] as const satisfies readonly SelectableOpenWikiProvider[];
 
 export const PROVIDER_CONFIGS: Record<OpenWikiProvider, ProviderConfig> = {
@@ -92,6 +99,30 @@ export const PROVIDER_CONFIGS: Record<OpenWikiProvider, ProviderConfig> = {
       { id: "openai/gpt-5.5", label: "GPT 5.5" },
     ],
   },
+  ollama: {
+    apiKeyEnvKey: OLLAMA_API_KEY_ENV_KEY,
+    apiKeyRequired: false,
+    defaultApiKey: "ollama",
+    label: "Ollama",
+    modelOptions: [
+      { id: "gemma4:26b", label: "Gemma 4" },
+      { id: "minimax-m2.5:cloud", label: "MiniMax M2.5 (Cloud)" },
+    ],
+    resolveBaseURL: (env) => {
+      const hasApiKey = Boolean(env[OLLAMA_API_KEY_ENV_KEY]);
+      const defaultBaseURL = hasApiKey
+        ? "https://ollama.com/v1"
+        : "http://localhost:11434/v1";
+      let baseURL = env[OLLAMA_BASE_URL_ENV_KEY] || defaultBaseURL;
+
+      // Automatically rewrite api.ollama.com to ollama.com to avoid 405 Method Not Allowed
+      // caused by POST request redirect conversion to GET.
+      if (baseURL.includes("api.ollama.com")) {
+        baseURL = baseURL.replace("api.ollama.com", "ollama.com");
+      }
+      return baseURL;
+    },
+  },
 };
 
 export const DEFAULT_MODEL_ID =
@@ -107,7 +138,14 @@ export const SUGGESTED_MODEL_IDS = PROVIDER_CONFIGS[
 ].modelOptions.map((model) => model.id);
 
 export function getProviderConfig(provider: OpenWikiProvider): ProviderConfig {
-  return PROVIDER_CONFIGS[provider];
+  const config = PROVIDER_CONFIGS[provider];
+  if (config.resolveBaseURL) {
+    return {
+      ...config,
+      baseURL: config.resolveBaseURL(process.env),
+    };
+  }
+  return config;
 }
 
 export function getProviderLabel(provider: OpenWikiProvider): string {

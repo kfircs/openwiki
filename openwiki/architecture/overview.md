@@ -42,7 +42,7 @@ Model creation branches by provider in `src/agent/index.ts` (`createModel`):
 
 - **anthropic** → `ChatAnthropic` with the Anthropic API key.
 - **openrouter** → `ChatOpenRouter` with `route: "fallback"` and a list of fallback models.
-- **baseten / fireworks / openai** → `ChatOpenAI` with the provider's API key and optional custom `baseURL` from `PROVIDER_CONFIGS`.
+- **baseten / fireworks / openai / ollama** → `ChatOpenAI` with the provider's API key (optional for Ollama) and optional custom `baseURL` from `PROVIDER_CONFIGS`. Some providers like ollama support `resolveBaseURL` functions in their config to compute the base URL dynamically at runtime — for example, ollama uses `http://localhost:11434/v1` when no API key is set, or `https://ollama.com/v1` when an API key is present.
 
 ### DeepAgents backend
 

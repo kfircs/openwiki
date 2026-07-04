@@ -4,6 +4,7 @@ import {
   DEFAULT_PROVIDER,
   getDefaultModelId,
   getProviderApiKeyEnvKey,
+  getProviderConfig,
   getProviderLabel,
   getProviderModelOptions,
   isValidModelId,
@@ -38,10 +39,13 @@ export function needsCredentialSetup(
 ): boolean {
   const provider = resolveConfiguredProvider();
   const apiKeyEnvKey = getProviderApiKeyEnvKey(provider);
+  const needsApiKey =
+    getProviderConfig(provider).apiKeyRequired !== false &&
+    !process.env[apiKeyEnvKey];
 
   return (
     process.env[OPENWIKI_PROVIDER_ENV_KEY] === undefined ||
-    !process.env[apiKeyEnvKey] ||
+    needsApiKey ||
     (modelIdOverride === null &&
       process.env[OPENWIKI_MODEL_ID_ENV_KEY] === undefined) ||
     process.env.LANGSMITH_API_KEY === undefined
@@ -370,16 +374,20 @@ export function InitSetup({
         <SetupStep
           label="Provider key"
           state={
-            process.env[getProviderApiKeyEnvKey(provider)]
+            getProviderConfig(provider).apiKeyRequired === false
               ? "done"
-              : step === "api-key"
-                ? "current"
-                : "pending"
+              : process.env[getProviderApiKeyEnvKey(provider)]
+                ? "done"
+                : step === "api-key"
+                  ? "current"
+                  : "pending"
           }
           detail={
-            process.env[getProviderApiKeyEnvKey(provider)]
-              ? "available from environment"
-              : `save ${getProviderApiKeyEnvKey(provider)} to ${openWikiEnvPath}`
+            getProviderConfig(provider).apiKeyRequired === false
+              ? "not required"
+              : process.env[getProviderApiKeyEnvKey(provider)]
+                ? "available from environment"
+                : `save ${getProviderApiKeyEnvKey(provider)} to ${openWikiEnvPath}`
           }
         />
         <SetupStep
@@ -630,7 +638,10 @@ function getInitialStep(
     return "provider";
   }
 
-  if (!process.env[getProviderApiKeyEnvKey(provider)]) {
+  if (
+    getProviderConfig(provider).apiKeyRequired !== false &&
+    !process.env[getProviderApiKeyEnvKey(provider)]
+  ) {
     return "api-key";
   }
 
@@ -652,7 +663,10 @@ function getNextStepAfterProvider(
   provider: OpenWikiProvider,
   modelIdOverride: string | null,
 ): PromptStep | null {
-  if (!process.env[getProviderApiKeyEnvKey(provider)]) {
+  if (
+    getProviderConfig(provider).apiKeyRequired !== false &&
+    !process.env[getProviderApiKeyEnvKey(provider)]
+  ) {
     return "api-key";
   }
 
